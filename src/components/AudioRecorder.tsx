@@ -205,10 +205,13 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
       // Refine text with LLM
       let refinedText = rawText;
       try {
+        // Get API key from localStorage
+        const apiKey = localStorage.getItem('openrouter_api_key');
+        
         const refineResponse = await fetch('/api/refine', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: rawText })
+          body: JSON.stringify({ text: rawText, apiKey })
         });
 
         if (refineResponse.ok) {

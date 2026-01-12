@@ -5,7 +5,7 @@ import { refineText } from '@/lib/openrouter';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { text } = body;
+    const { text, apiKey } = body;
 
     if (!text || typeof text !== 'string') {
       return NextResponse.json<ApiError>(
@@ -14,10 +14,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check for API key
-    if (!process.env.OPENROUTER_API_KEY) {
+    // Check for API key from request body or environment
+    const effectiveApiKey = apiKey || process.env.OPENROUTER_API_KEY;
+    
+    if (!effectiveApiKey) {
       return NextResponse.json<ApiError>(
-        { error: 'Configuration error', message: 'Add OPENROUTER_API_KEY to enable refinement' },
+        { error: 'Configuration error', message: 'Please add your API key in Settings' },
         { status: 503 }
       );
     }
@@ -25,13 +27,13 @@ export async function POST(request: NextRequest) {
     // Call OpenRouter for refinement
     let refined: string;
     try {
-      refined = await refineText(text);
+      refined = await refineText(text, effectiveApiKey);
     } catch (error) {
       // Retry once after 1 second for rate limiting
       if (error instanceof Error && error.message.includes('429')) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         try {
-          refined = await refineText(text);
+          refined = await refineText(text, effectiveApiKey);
         } catch {
           return NextResponse.json<ApiError>(
             {

@@ -33,10 +33,10 @@ interface OpenRouterResponse {
   };
 }
 
-export async function refineText(rawText: string): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
+export async function refineText(rawText: string, apiKey?: string): Promise<string> {
+  const effectiveApiKey = apiKey || process.env.OPENROUTER_API_KEY;
 
-  if (!apiKey) {
+  if (!effectiveApiKey) {
     throw new Error('OPENROUTER_API_KEY is not configured');
   }
 
@@ -49,7 +49,7 @@ export async function refineText(rawText: string): Promise<string> {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
+      'Authorization': `Bearer ${effectiveApiKey}`,
       'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
       'X-Title': 'Speech to Text App'
     },
