@@ -5,7 +5,7 @@ import { refineText } from '@/lib/openrouter';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { text, apiKey } = body;
+    const { text, apiKey, modelId } = body;
 
     if (!text || typeof text !== 'string') {
       return NextResponse.json<ApiError>(
@@ -24,16 +24,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Call OpenRouter for refinement
+    // Call OpenRouter for refinement with selected model
     let refined: string;
     try {
-      refined = await refineText(text, effectiveApiKey);
+      refined = await refineText(text, effectiveApiKey, modelId);
     } catch (error) {
       // Retry once after 1 second for rate limiting
       if (error instanceof Error && error.message.includes('429')) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         try {
-          refined = await refineText(text, effectiveApiKey);
+          refined = await refineText(text, effectiveApiKey, modelId);
         } catch {
           return NextResponse.json<ApiError>(
             {

@@ -33,12 +33,15 @@ interface OpenRouterResponse {
   };
 }
 
-export async function refineText(rawText: string, apiKey?: string): Promise<string> {
+export async function refineText(rawText: string, apiKey?: string, modelId?: string): Promise<string> {
   const effectiveApiKey = apiKey || process.env.OPENROUTER_API_KEY;
 
   if (!effectiveApiKey) {
     throw new Error('OPENROUTER_API_KEY is not configured');
   }
+
+  // Use provided model or default to xiaomi/mimo-v2-flash:free
+  const selectedModel = modelId || 'xiaomi/mimo-v2-flash:free';
 
   const messages: OpenRouterMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -54,7 +57,7 @@ export async function refineText(rawText: string, apiKey?: string): Promise<stri
       'X-Title': 'Speech to Text App'
     },
     body: JSON.stringify({
-      model: 'xiaomi/mimo-v2-flash:free',
+      model: selectedModel,
       messages,
       temperature: 0.3,
       max_tokens: 2000

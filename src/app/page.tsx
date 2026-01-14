@@ -114,14 +114,15 @@ export default function Home() {
 
     const textToRefine = isEditing ? editedText : (currentRecording.refinedText || currentRecording.rawText);
 
-    // Get API key from localStorage
+    // Get API key and model from localStorage
     const apiKey = localStorage.getItem('openrouter_api_key');
+    const modelId = localStorage.getItem('openrouter_model_id');
 
     try {
       const response = await fetch('/api/refine', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: textToRefine, apiKey })
+        body: JSON.stringify({ text: textToRefine, apiKey, modelId })
       });
 
       if (!response.ok) {
