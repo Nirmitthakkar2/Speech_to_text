@@ -1,6 +1,6 @@
 'use client';
 
-import { Recording } from '@/types';
+import { Recording } from '../types';
 import TranscriptionCard from './TranscriptionCard';
 
 interface RecordingHistoryProps {

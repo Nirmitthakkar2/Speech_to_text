@@ -1,7 +1,5 @@
-'use client';
-
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Recording, RecorderState } from '@/types';
+import { Recording, RecorderState } from '../types';
 
 interface AudioRecorderProps {
   onRecordingComplete: (recording: Recording) => void;
@@ -11,6 +9,36 @@ interface AudioRecorderProps {
 const MAX_RECORDING_TIME = 5 * 60 * 1000; // 5 minutes in ms
 const MIN_RECORDING_TIME = 1000; // 1 second in ms
 
+// Extend Window interface for speech recognition
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message?: string;
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition: new () => SpeechRecognition;
+    webkitSpeechRecognition: new () => SpeechRecognition;
+  }
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+}
+
 export default function AudioRecorder({ onRecordingComplete, onError }: AudioRecorderProps) {
   const [state, setState] = useState<RecorderState>({
     status: 'idle',
@@ -18,14 +46,15 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
     error: null
   });
   const [waveformData, setWaveformData] = useState<number[]>(new Array(12).fill(10));
+  const [transcribedText, setTranscribedText] = useState('');
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const transcriptRef = useRef<string>('');
 
   // Cleanup function
   const cleanup = useCallback(() => {
@@ -41,8 +70,12 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
+    if (recognitionRef.current) {
+      recognitionRef.current.abort();
+      recognitionRef.current = null;
+    }
     analyserRef.current = null;
-    audioChunksRef.current = [];
+    setWaveformData(new Array(12).fill(10));
   }, []);
 
   // Cleanup on unmount
@@ -82,13 +115,78 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
     animationFrameRef.current = requestAnimationFrame(updateWaveform);
   }, [state.status]);
 
+  // Refine text with OpenRouter
+  const refineText = async (rawText: string): Promise<string> => {
+    const apiKey = localStorage.getItem('openrouter_api_key');
+    const modelId = localStorage.getItem('openrouter_model_id') || 'xiaomi/mimo-v2-flash:free';
+
+    if (!apiKey) {
+      return rawText; // Return raw text if no API key
+    }
+
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': window.location.origin,
+          'X-Title': 'Speech to Text Pro'
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            {
+              role: 'system',
+              content: `Transform speech-to-text output into clear, professional text. Preserve meaning and intent.
+
+Rules:
+- Add proper punctuation and capitalization
+- Remove filler words (um, uh, like, you know)
+- Fix grammar and awkward phrasing
+- Break run-on sentences
+- Correct speech recognition errors
+- Keep speaker's voice, tone, terminology
+- Preserve names and technical terms
+- Do not add new information
+
+Output only the refined text.`
+            },
+            { role: 'user', content: rawText }
+          ],
+          temperature: 0.3,
+          max_tokens: 2000
+        })
+      });
+
+      if (!response.ok) {
+        return rawText;
+      }
+
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || rawText;
+    } catch {
+      return rawText;
+    }
+  };
+
   // Start recording
   const startRecording = async () => {
+    // Check for speech recognition support
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    
+    if (!SpeechRecognition) {
+      onError('Speech recognition not supported. Try Chrome, Edge, or Safari.');
+      return;
+    }
+
     try {
       cleanup();
       setState({ status: 'recording', elapsedTime: 0, error: null });
+      transcriptRef.current = '';
+      setTranscribedText('');
 
-      // Request microphone access
+      // Request microphone access for waveform visualization
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
@@ -103,24 +201,52 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
       // Start waveform animation
       animationFrameRef.current = requestAnimationFrame(updateWaveform);
 
-      // Create MediaRecorder
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
+      // Initialize speech recognition
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+      recognitionRef.current = recognition;
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
+        let finalTranscript = '';
+        let interimTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + ' ';
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+
+        if (finalTranscript) {
+          transcriptRef.current += finalTranscript;
+        }
+        setTranscribedText(transcriptRef.current + interimTranscript);
+      };
+
+      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+        if (event.error === 'no-speech') {
+          // Ignore no-speech errors, they're common
+          return;
+        }
+        console.error('Speech recognition error:', event.error);
+      };
+
+      recognition.onend = () => {
+        // Restart if still recording
+        if (state.status === 'recording' && recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+          } catch {
+            // Ignore errors when restarting
+          }
         }
       };
 
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        await processRecording(audioBlob);
-      };
-
-      // Start recording and timer
-      mediaRecorder.start();
+      recognition.start();
       startTimeRef.current = Date.now();
 
       timerIntervalRef.current = setInterval(() => {
@@ -148,7 +274,7 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
   };
 
   // Stop recording
-  const stopRecording = () => {
+  const stopRecording = async () => {
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
@@ -168,8 +294,9 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
       return;
     }
 
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
+    // Stop speech recognition
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
     }
 
     if (streamRef.current) {
@@ -178,69 +305,33 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
 
     setState(prev => ({ ...prev, status: 'processing' }));
     setWaveformData(new Array(12).fill(10));
-  };
 
-  // Process the recorded audio
-  const processRecording = async (audioBlob: Blob) => {
-    const recordingDuration = (Date.now() - startTimeRef.current) / 1000;
-
-    try {
-      // Transcribe audio
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'audio.webm');
-
-      const transcribeResponse = await fetch('/api/transcribe', {
-        method: 'POST',
-        body: formData
-      });
-
-      const transcribeData = await transcribeResponse.json();
-
-      if (!transcribeResponse.ok) {
-        throw new Error(transcribeData.message || 'Transcription failed');
-      }
-
-      const rawText = transcribeData.text;
-
-      // Refine text with LLM
-      let refinedText = rawText;
-      try {
-        // Get API key and model from localStorage
-        const apiKey = localStorage.getItem('openrouter_api_key');
-        const modelId = localStorage.getItem('openrouter_model_id');
-        
-        const refineResponse = await fetch('/api/refine', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: rawText, apiKey, modelId })
-        });
-
-        if (refineResponse.ok) {
-          const refineData = await refineResponse.json();
-          refinedText = refineData.refined;
-        }
-        // If refinement fails, we'll use raw text
-      } catch {
-        // Silently fall back to raw text
-      }
-
-      // Create recording object
-      const recording: Recording = {
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        duration: recordingDuration,
-        rawText,
-        refinedText
-      };
-
-      onRecordingComplete(recording);
-      setState({ status: 'idle', elapsedTime: 0, error: null });
-    } catch (error) {
-      setState({ status: 'idle', elapsedTime: 0, error: null });
-      onError(error instanceof Error ? error.message : 'Processing failed');
-    } finally {
+    // Get final transcript
+    const rawText = transcriptRef.current.trim();
+    
+    if (!rawText) {
       cleanup();
+      setState({ status: 'idle', elapsedTime: 0, error: null });
+      onError('No speech detected. Try speaking louder.');
+      return;
     }
+
+    // Refine the text
+    const refinedText = await refineText(rawText);
+
+    // Create recording object
+    const recording: Recording = {
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      duration: elapsed / 1000,
+      rawText,
+      refinedText
+    };
+
+    onRecordingComplete(recording);
+    setState({ status: 'idle', elapsedTime: 0, error: null });
+    setTranscribedText('');
+    cleanup();
   };
 
   // Toggle recording
@@ -257,7 +348,7 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
       <h2 className="text-xl font-semibold text-gray-800 text-center mb-6">
         {state.status === 'idle' && 'Tap to start recording'}
         {state.status === 'recording' && 'Recording...'}
-        {state.status === 'processing' && 'Transcribing...'}
+        {state.status === 'processing' && 'Processing...'}
       </h2>
 
       {/* Record Button */}
@@ -302,6 +393,13 @@ export default function AudioRecorder({ onRecordingComplete, onError }: AudioRec
           />
         ))}
       </div>
+
+      {/* Live Transcript Preview */}
+      {transcribedText && state.status === 'recording' && (
+        <div className="mt-4 p-3 bg-gray-50 rounded-lg max-h-24 overflow-y-auto">
+          <p className="text-sm text-gray-600">{transcribedText}</p>
+        </div>
+      )}
 
       {/* Hint */}
       <p className="text-center text-gray-500 text-sm">
